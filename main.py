@@ -8,7 +8,7 @@ import torch.nn.functional as F
 
 OUTPUT = True
 DEBUG = True
-# DEBUG = False
+DEBUG = False
 def debug(*args):
     if DEBUG:
         print(*args)
@@ -61,10 +61,8 @@ def lr_generation(ratio: float,
         delta_y = np.random.uniform(-shift_pixel_range, shift_pixel_range)
         # 旋转变换矩阵（ahpha为正代表逆时针）
         rotation_matrix = cv2.getRotationMatrix2D(center=(0, 0), angle=alpha, scale=1)
-        rotation_matrix = cv2.getRotationMatrix2D(center=(0, 0), angle=i*3-15, scale=1)
         # 平移变换矩阵
         shift_matrix = np.float32([[0, 0, delta_x], [0, 0, delta_y]])
-        shift_matrix = np.float32([[0, 0, i*5-25], [0, 0, i*5-25]]) # TODO: This is only for testing. 
         # 对图像应用变换
         X_new: cv2.Mat = cv2.warpAffine(src=X_ori, M=rotation_matrix+shift_matrix, 
                                         dsize=(X_ori.shape[1], X_ori.shape[0]), borderValue=(0, 0, 0))
@@ -123,25 +121,32 @@ def mv_est(Y_seq: List[cv2.Mat], radius: int = 500, max_corners: int = 10):
         # X1*x + X2*y + X3 = x' => AX = B
         # Y1*x + Y2*y + Y3 = y'
         # We have x, y, x', y'. We want X and Y. 
+        
         A_x = np.c_[points, np.ones(max_corners)]
         B_x = points_new[:, 0]
-        debug("A_x:", A_x)
-        debug("B_x:", B_x)
-        U_x, Sigma_x, V_x = np.linalg.svd(A_x)
-        Sigma_x = np.diag(Sigma_x)
-        debug("U_x, Sigma_x, V_x's shapes:", U_x.shape, Sigma_x.shape, V_x.shape)
-        X_vec = V_x*np.c_[np.linalg.inv(Sigma_x), np.zeros((3, max_corners-3))]*U_x.T*B_x
-        debug("X_vec:", X_vec)
+        X_vec = solve_equation(A_x, B_x)
         
-        A_y = points
+        A_y = np.c_[points, np.ones(max_corners)]
         B_y = points_new[:, 1]
-        U_y, Sigma_y, V_y = np.linalg.svd(A_y)
-        Sigma_y = np.diag(Sigma_y)
-        Y_vec = np.linalg.inv(Sigma_y*V_y.T)*U_y.T*B_y
-        debug("Y_vec:", Y_vec)
+        Y_vec = solve_equation(A_y, B_y)
         
-        
+        mv_matrix = np.stack([X_vec, Y_vec])
+        debug("mv_matrix:", mv_matrix)
+        mv_seq.append(mv_matrix)
     return mv_seq
+
+def solve_equation(A: np.ndarray, B: np.ndarray) -> np.ndarray:
+    '''用SVD解方程组AX = B。
+    
+    Returns:
+    ---
+    X: 最优解向量。
+    '''
+    x_dim = A.shape[1]
+    U, Sigma, V = np.linalg.svd(A)
+    X_vec = np.matmul(np.linalg.inv(V.T), np.matmul(U.T, B)[:x_dim]/Sigma)
+    return X_vec
+    
 
 
 # 实现一轮梯度下降迭代
@@ -189,11 +194,8 @@ def grad_L2(X: cv2.Mat, Y_seq: List[cv2.Mat], mv_seq, ratio, H_kernel) -> cv2.Ma
         X_new = cv2.filter2D(src=X_new, ddepth=-1, kernel=H_kernel) # 模糊
         X_new = cv2.resize(src=X_new, dsize=(X.shape[1]//ratio, X.shape[0]//ratio)) # 降采样。dsize里面长和宽是相反的...
         
-        debug("X_new:", X_new)
-        debug("Y_seq[i]:", Y_seq[i])
         estimated_error = X_new-Y_seq[i]
         debug("estimated error's shape:", estimated_error.shape)
-        debug("estimated error:",estimated_error)
         print("estimated error's L2 norm:", 
               np.sqrt(np.sum(np.square(estimated_error)) / 
                       (np.shape(estimated_error)[0] * np.shape(estimated_error)[1]))
@@ -202,7 +204,7 @@ def grad_L2(X: cv2.Mat, Y_seq: List[cv2.Mat], mv_seq, ratio, H_kernel) -> cv2.Ma
         tmp = cv2.resize(src=estimated_error, dsize=(X.shape[1], X.shape[0])) # 上采样
         tmp = my_conv_transpose_2d(tmp, H_kernel) # 逆模糊（转置卷积）
         F_i_inverse = np.linalg.inv(F_i)
-        debug("Inverse (x, y) transform matrix:", F_i_inverse)
+        # debug("Inverse (x, y) transform matrix:", F_i_inverse)
         grad: cv2.Mat = cv2.warpAffine(src=tmp, M=F_i_inverse[:2], dsize=(X.shape[1], X.shape[0]), borderValue=(0, 0, 0)) # 逆几何变换
         debug("grad's shape:", grad.shape)
         grads.append(grad)
@@ -290,8 +292,12 @@ def grad_BTV(X, Y_seq, mv_seq, ratio, lamda, P, alpha):
 
 # 完成迭代优化的主函数
 def main():
-    X_ori, Y_seq, H_kernel= lr_generation(10, "./kq.jpg", rotate_angle_range=0, shift_pixel_range=0, noise_sigma=5, use_grayscale=False)
+    X_ori, Y_seq, H_kernel= lr_generation(10, "./kq.jpg", rotate_angle_range=20, shift_pixel_range=20, 
+                                          noise_sigma=5, use_grayscale=False)
     mv_seq = mv_est(Y_seq)
+    debug("Movement matrices:")
+    for M in mv_seq:
+        debug(M)
     # X_start = cv2.resize(Y_seq[0], dsize=(X_ori.shape[1], X_ori.shape[0]))
     X_start = np.zeros(X_ori.shape, dtype=np.float32)
     for epoch in range(1, 51):
