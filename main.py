@@ -59,12 +59,15 @@ def lr_generation(ratio: float,
         alpha = np.random.uniform(-rotate_angle_range, rotate_angle_range)
         delta_x = np.random.uniform(-shift_pixel_range, shift_pixel_range)
         delta_y = np.random.uniform(-shift_pixel_range, shift_pixel_range)
+        resize_scale = np.random.uniform(1, 1)
         # 旋转变换矩阵（ahpha为正代表逆时针）
-        rotation_matrix = cv2.getRotationMatrix2D(center=(0, 0), angle=alpha, scale=1)
+        rotation_matrix = cv2.getRotationMatrix2D(center=(X_ori.shape[1]/2, X_ori.shape[0]/2), angle=alpha, scale=resize_scale)
         # 平移变换矩阵
         shift_matrix = np.float32([[0, 0, delta_x], [0, 0, delta_y]])
         # 对图像应用变换
-        X_new: cv2.Mat = cv2.warpAffine(src=X_ori, M=rotation_matrix+shift_matrix, 
+        movement_matrix = rotation_matrix+shift_matrix
+        debug("Real movement matrix:", movement_matrix)
+        X_new: cv2.Mat = cv2.warpAffine(src=X_ori, M=movement_matrix, 
                                         dsize=(X_ori.shape[1], X_ori.shape[0]), borderValue=(0, 0, 0))
                                         # dsize里面长和宽是相反的...
         X_seq.append(X_new)
@@ -91,7 +94,7 @@ def lr_generation(ratio: float,
 
 
 # 以第一张低分辨率图像为参考图像，计算序列中其他图像相对参考图像的运动
-def mv_est(Y_seq: List[cv2.Mat], radius: int = 500, max_corners: int = 10):
+def mv_est(Y_seq: List[cv2.Mat], radius: int = 500, max_corners: int = 5):
     """
     使用光流算法找不同图像之间的参考点，然后用SVD解线性方程组得到坐标变换矩阵。
 
@@ -106,7 +109,7 @@ def mv_est(Y_seq: List[cv2.Mat], radius: int = 500, max_corners: int = 10):
     mv_seq = []
     if len(Y_seq[0].shape)==3: # RGB or BGR or something
         points = cv2.goodFeaturesToTrack(cv2.cvtColor(Y_seq[0].astype(np.uint8), cv2.COLOR_BGR2GRAY), 
-                                         maxCorners=max_corners, qualityLevel=0.3, minDistance=10)
+                                         maxCorners=max_corners, qualityLevel=0.5, minDistance=20)
     else: # Grayscale
         points = cv2.goodFeaturesToTrack(Y_seq[0].astype(np.uint8), maxCorners=max_corners, qualityLevel=0.3, minDistance=10)
     points: cv2.Mat = points.astype(np.float32)
@@ -115,8 +118,8 @@ def mv_est(Y_seq: List[cv2.Mat], radius: int = 500, max_corners: int = 10):
         points_new, st, err = cv2.calcOpticalFlowPyrLK(Y_i.astype(np.uint8), Y_seq[0].astype(np.uint8), points, None)
         points_new: cv2.Mat = points_new.astype(np.float32)
         points_new = points_new.squeeze() # (max_corners, 1, 2) -> (max_corners, 2)
-        debug("Points:", points)
-        debug("Points_new:", points_new)
+        # debug("Points:", points)
+        # debug("Points_new:", points_new)
         
         # X1*x + X2*y + X3 = x' => AX = B
         # Y1*x + Y2*y + Y3 = y'
@@ -135,6 +138,7 @@ def mv_est(Y_seq: List[cv2.Mat], radius: int = 500, max_corners: int = 10):
         mv_seq.append(mv_matrix)
     return mv_seq
 
+
 def solve_equation(A: np.ndarray, B: np.ndarray) -> np.ndarray:
     '''用SVD解方程组AX = B。
     
@@ -142,12 +146,13 @@ def solve_equation(A: np.ndarray, B: np.ndarray) -> np.ndarray:
     ---
     X: 最优解向量。
     '''
-    x_dim = A.shape[1]
-    U, Sigma, V = np.linalg.svd(A)
-    X_vec = np.matmul(np.linalg.inv(V.T), np.matmul(U.T, B)[:x_dim]/Sigma)
+    # x_dim = A.shape[1]
+    # U, Sigma, V = np.linalg.svd(A)
+    # X_vec = np.matmul(np.linalg.inv(V.T), np.matmul(U.T, B)[:x_dim]/Sigma)
+    X_vec = np.matmul(np.linalg.pinv(A), B)
+    # 他奶奶滴，我怎么不知道pinv这么一个好东西居然是用SVD得出来的，居然可以用来干这个
     return X_vec
     
-
 
 # 实现一轮梯度下降迭代
 def grad_desent(X: cv2.Mat, Y_seq: List[cv2.Mat], mv_seq, ratio, beta, H_kernel, loss: str = "L2"):
@@ -196,10 +201,11 @@ def grad_L2(X: cv2.Mat, Y_seq: List[cv2.Mat], mv_seq, ratio, H_kernel) -> cv2.Ma
         
         estimated_error = X_new-Y_seq[i]
         debug("estimated error's shape:", estimated_error.shape)
-        print("estimated error's L2 norm:", 
-              np.sqrt(np.sum(np.square(estimated_error)) / 
-                      (np.shape(estimated_error)[0] * np.shape(estimated_error)[1]))
-              )
+        if i==0:
+            print("estimated error's L2 norm of Y_seq[0]:", 
+                np.sqrt(np.sum(np.square(estimated_error)) / 
+                        (np.shape(estimated_error)[0] * np.shape(estimated_error)[1]))
+                )
         
         tmp = cv2.resize(src=estimated_error, dsize=(X.shape[1], X.shape[0])) # 上采样
         tmp = my_conv_transpose_2d(tmp, H_kernel) # 逆模糊（转置卷积）
@@ -292,20 +298,23 @@ def grad_BTV(X, Y_seq, mv_seq, ratio, lamda, P, alpha):
 
 # 完成迭代优化的主函数
 def main():
-    X_ori, Y_seq, H_kernel= lr_generation(10, "./kq.jpg", rotate_angle_range=20, shift_pixel_range=20, 
-                                          noise_sigma=5, use_grayscale=False)
+    sr_ratio = 10
+    X_ori, Y_seq, H_kernel= lr_generation(sr_ratio, "./kq.jpg", rotate_angle_range=10, shift_pixel_range=20, 
+                                          noise_sigma=5, use_grayscale=False, blur_kernel_sigma=10, blur_kernel_size=31)
     mv_seq = mv_est(Y_seq)
-    debug("Movement matrices:")
+    debug("Calculated movement matrices:")
     for M in mv_seq:
         debug(M)
-    # X_start = cv2.resize(Y_seq[0], dsize=(X_ori.shape[1], X_ori.shape[0]))
-    X_start = np.zeros(X_ori.shape, dtype=np.float32)
+    X_start = cv2.resize(Y_seq[0], dsize=(X_ori.shape[1], X_ori.shape[0]))
+    # X_start = np.zeros(X_ori.shape, dtype=np.float32)
+    # for epoch in range(1, 51):
+    #     # grad_desent(X_start, Y_seq, mv_seq, ratio=10, beta=0.5, H_kernel=H_kernel, loss="L1")
+    #     grad_desent(X_start, Y_seq, mv_seq, ratio=10, beta=0.005, H_kernel=H_kernel, loss="L2")
     for epoch in range(1, 51):
-        # grad_desent(X_start, Y_seq, mv_seq, ratio=10, beta=0.5, H_kernel=H_kernel, loss="L1")
-        grad_desent(X_start, Y_seq, mv_seq, ratio=10, beta=0.005, H_kernel=H_kernel, loss="L2")
-    # for epoch in range(1, 21):
-        # grad_desent(X_start, Y_seq, mv_seq, ratio=10, beta=0.0003, H_kernel=H_kernel, loss="L2")
-        print("epoch %d completed. "%epoch)
+        lr = 0.002*np.exp(-epoch/10)
+        print("Epoch %d: lr = %f"%(epoch, lr))
+        grad_desent(X_start, Y_seq, mv_seq, ratio=sr_ratio, beta=lr, H_kernel=H_kernel, loss="L2")
+        print("Epoch %d completed. "%epoch)
         cv2.imwrite("./outputs/epoch_%d.jpg"%epoch, X_start)
 
 
