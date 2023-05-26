@@ -50,11 +50,18 @@ def lr_generation(ratio: float,
 
     # 添加帧间运动，生成高分辨率图像序列，以第一张为真值(ground truth)
     X_seq: List[cv2.Mat] = [X_ori]
+    alphas = np.linspace(0, rotate_angle_range, serie_len, endpoint=False)
+    delta_xs = np.linspace(0, shift_pixel_range, serie_len, endpoint=False)
+    delta_ys = np.linspace(0, shift_pixel_range, serie_len, endpoint=False)
     for i in range(1, serie_len):
-        alpha = np.random.uniform(-rotate_angle_range, rotate_angle_range)
-        delta_x = np.random.uniform(-shift_pixel_range, shift_pixel_range)
-        delta_y = np.random.uniform(-shift_pixel_range, shift_pixel_range)
-        resize_scale = np.random.uniform(1, 1)
+        # alpha = np.random.uniform(-rotate_angle_range, rotate_angle_range)
+        # delta_x = np.random.uniform(-shift_pixel_range, shift_pixel_range)
+        # delta_y = np.random.uniform(-shift_pixel_range, shift_pixel_range)
+        alpha = alphas[i]
+        delta_x = delta_xs[i]
+        delta_y = delta_ys[i]
+        # resize_scale = np.random.uniform(1.2, 1.2)
+        resize_scale = 1
         # 旋转变换矩阵（ahpha为正代表逆时针）
         rotation_matrix = cv2.getRotationMatrix2D(center=(X_ori.shape[1]/2, X_ori.shape[0]/2), angle=alpha, scale=resize_scale)
         # 平移变换矩阵
@@ -63,7 +70,7 @@ def lr_generation(ratio: float,
         movement_matrix = rotation_matrix+shift_matrix
         debug("Real movement matrix:", movement_matrix)
         X_new: cv2.Mat = cv2.warpAffine(src=X_ori, M=movement_matrix, 
-                                        dsize=(X_ori.shape[1], X_ori.shape[0]), borderValue=(0, 0, 0))
+                                        dsize=(X_ori.shape[1], X_ori.shape[0]))
                                         # dsize里面长和宽是相反的...
         X_seq.append(X_new)
         debug("Ground truth: rotation is", alpha, "and shift is", delta_x, delta_y)
@@ -109,9 +116,13 @@ def mv_est(Y_seq: List[cv2.Mat], radius: int = 500, max_corners: int = 5):
         points = cv2.goodFeaturesToTrack(Y_seq[0].astype(np.uint8), maxCorners=max_corners, qualityLevel=0.3, minDistance=10)
     points: cv2.Mat = points.astype(np.float32)
     points = points.squeeze() # (max_corners, 1, 2) -> (max_corners, 2)
+    points_prev = points.copy()
+    Y_prev = Y_seq[0]
     for i, Y_i in enumerate(Y_seq):
-        points_new, st, err = cv2.calcOpticalFlowPyrLK(Y_i.astype(np.uint8), Y_seq[0].astype(np.uint8), points, None)
+        points_new, st, err = cv2.calcOpticalFlowPyrLK(Y_prev.astype(np.uint8), Y_i.astype(np.uint8), points_prev, None)
         points_new: cv2.Mat = points_new.astype(np.float32)
+        points_prev = points_new.copy()
+        Y_prev = Y_i
         points_new = points_new.squeeze() # (max_corners, 1, 2) -> (max_corners, 2)
         # debug("Points:", points)
         # debug("Points_new:", points_new)
@@ -176,7 +187,7 @@ def grad_L2(X: cv2.Mat, Y_seq: List[cv2.Mat], mv_seq, ratio, H_kernel) -> cv2.Ma
     for i in range(len(Y_seq)):
         F_i = np.concatenate([mv_seq[i], np.float32([[0, 0, 1]])]) # (x, y)的坐标变换矩阵
         X_new: cv2.Mat = cv2.warpAffine(src=X, M=F_i[:2], 
-                                        dsize=(X.shape[1]//ratio, X.shape[0]//ratio), borderValue=(0, 0, 0)) # 几何变换
+                                        dsize=(X.shape[1]//ratio, X.shape[0]//ratio)) # 几何变换
         X_new = cv2.filter2D(src=X_new, ddepth=-1, kernel=H_kernel) # 模糊
         X_new = cv2.resize(src=X_new, dsize=(X.shape[1]//ratio, X.shape[0]//ratio)) # 降采样。dsize里面长和宽是相反的...
         
@@ -193,7 +204,7 @@ def grad_L2(X: cv2.Mat, Y_seq: List[cv2.Mat], mv_seq, ratio, H_kernel) -> cv2.Ma
         F_i_inverse = np.linalg.inv(F_i)
         # debug("Inverse (x, y) transform matrix:", F_i_inverse)
         grad: cv2.Mat = cv2.warpAffine(src=tmp, M=F_i_inverse[:2], 
-                                       dsize=(X.shape[1], X.shape[0]), borderValue=(0, 0, 0)) # 逆几何变换
+                                       dsize=(X.shape[1], X.shape[0])) # 逆几何变换
         debug("grad's shape:", grad.shape)
         grads.append(grad)
     return np.sum(grads, axis=0)
@@ -221,32 +232,31 @@ def grad_L1(X: cv2.Mat, Y_seq: List[cv2.Mat], mv_seq, ratio, H_kernel) -> cv2.Ma
     for i in range(len(Y_seq)):
         F_i = np.concatenate([mv_seq[i], np.float32([[0, 0, 1]])]) # (x, y)的坐标变换矩阵
         X_new: cv2.Mat = cv2.warpAffine(src=X, M=F_i[:2], 
-                                        dsize=(X.shape[1]//ratio, X.shape[0]//ratio), borderValue=(0, 0, 0)) # 几何变换
+                                        dsize=(X.shape[1]//ratio, X.shape[0]//ratio)) # 几何变换
         X_new = cv2.filter2D(src=X_new, ddepth=-1, kernel=H_kernel) # 模糊
         X_new = cv2.resize(src=X_new, dsize=(X.shape[1]//ratio, X.shape[0]//ratio)) # 降采样。dsize里面长和宽是相反的...
         
-        debug("X_new:", X_new)
-        debug("Y_seq[i]:", Y_seq[i])
         estimated_error = X_new-Y_seq[i]
         debug("estimated error's shape:", estimated_error.shape)
-        debug("estimated error:",estimated_error)
-        print("estimated error's L1 norm:", 
-              np.sum(np.absolute(estimated_error)) / 
-              (np.shape(estimated_error)[0] * np.shape(estimated_error)[1]))
+        if i==0:
+            print("estimated error's L2 norm of Y_seq[0]:", 
+                np.sqrt(np.sum(np.square(estimated_error)) / 
+                        (np.shape(estimated_error)[0] * np.shape(estimated_error)[1]))
+                )
         signed_estimated_error = np.sign(estimated_error)
         
         tmp = cv2.resize(src=signed_estimated_error, dsize=(X.shape[1], X.shape[0])) # 上采样
         tmp = my_conv_transpose_2d(tmp, H_kernel) # 逆模糊（转置卷积）
         F_i_inverse = np.linalg.inv(F_i)
-        debug("Inverse (x, y) transform matrix:", F_i_inverse)
-        grad: cv2.Mat = cv2.warpAffine(src=tmp, M=F_i_inverse[:2], dsize=(X.shape[1], X.shape[0]), borderValue=(0, 0, 0)) # 逆几何变换
+        grad: cv2.Mat = cv2.warpAffine(src=tmp, M=F_i_inverse[:2], 
+                                       dsize=(X.shape[1], X.shape[0])) # 逆几何变换
         debug("grad's shape:", grad.shape)
         grads.append(grad)
     return np.sum(grads, axis=0)
 
 
 # 基于L1范数，使用双边全变分正则项的梯度
-def grad_BTV(X, Y_seq, mv_seq, ratio, lamda, P, alpha):
+def grad_BTV(X, Y_seq, mv_seq, ratio, H_kernel, lamda, P, alpha):
     """
     X : 上一轮重建的高分辨率图像
     Y_seq = [Y1,...,YN] : 低分辨率图像序列
@@ -255,15 +265,19 @@ def grad_BTV(X, Y_seq, mv_seq, ratio, lamda, P, alpha):
     lamda: 正则项系数
     P, alpha: BTV相关的参数
     """
-
-    pass
+    grad = grad_L1(X, Y_seq, mv_seq, ratio, H_kernel)
+    for dx in range(-P, P+1):
+        for dy in range(-P, P+1):
+            pass
+    return grad
 
 
 # 完成迭代优化的主函数
 def main():
     sr_ratio = 10
-    X_ori, Y_seq, H_kernel= lr_generation(sr_ratio, "./kq.jpg", rotate_angle_range=10, shift_pixel_range=20, 
-                                          noise_sigma=5, use_grayscale=False, blur_kernel_sigma=10, blur_kernel_size=31)
+    X_ori, Y_seq, H_kernel= lr_generation(sr_ratio, "./ori.jpg", rotate_angle_range=20, shift_pixel_range=50, 
+                                          noise_sigma=5, use_grayscale=True, blur_kernel_sigma=10, blur_kernel_size=15, 
+                                          serie_len=10)
     mv_seq = mv_est(Y_seq)
     debug("Calculated movement matrices:")
     for M in mv_seq:
@@ -274,7 +288,7 @@ def main():
     #     # grad_desent(X_start, Y_seq, mv_seq, ratio=10, beta=0.5, H_kernel=H_kernel, loss="L1")
     #     grad_desent(X_start, Y_seq, mv_seq, ratio=10, beta=0.005, H_kernel=H_kernel, loss="L2")
     for epoch in range(1, 51):
-        lr = 0.002*np.exp(-epoch/10)
+        lr = 0.002*np.exp(-epoch/30)
         print("Epoch %d: lr = %f"%(epoch, lr))
         grad_desent(X_start, Y_seq, mv_seq, ratio=sr_ratio, beta=lr, H_kernel=H_kernel, loss="L2")
         print("Epoch %d completed. "%epoch)
