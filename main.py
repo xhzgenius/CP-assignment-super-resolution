@@ -8,7 +8,7 @@ import torch.nn.functional as F
 
 OUTPUT = True
 DEBUG = True
-DEBUG = False
+# DEBUG = False
 def debug(*args):
     if DEBUG:
         print(*args)
@@ -93,7 +93,7 @@ def lr_generation(ratio: float,
 
 
 # 以第一张低分辨率图像为参考图像，计算序列中其他图像相对参考图像的运动
-def mv_est(Y_seq: List[cv2.Mat], radius: int = 500):
+def mv_est(Y_seq: List[cv2.Mat], radius: int = 500, max_corners: int = 10):
     """
     使用光流算法找不同图像之间的参考点，然后用SVD解线性方程组得到坐标变换矩阵。
 
@@ -108,21 +108,38 @@ def mv_est(Y_seq: List[cv2.Mat], radius: int = 500):
     mv_seq = []
     if len(Y_seq[0].shape)==3: # RGB or BGR or something
         points = cv2.goodFeaturesToTrack(cv2.cvtColor(Y_seq[0].astype(np.uint8), cv2.COLOR_BGR2GRAY), 
-                                         maxCorners=6, qualityLevel=0.5, minDistance=20)
+                                         maxCorners=max_corners, qualityLevel=0.3, minDistance=10)
     else: # Grayscale
-        points = cv2.goodFeaturesToTrack(Y_seq[0].astype(np.uint8), maxCorners=6, qualityLevel=0.5, minDistance=20)
+        points = cv2.goodFeaturesToTrack(Y_seq[0].astype(np.uint8), maxCorners=max_corners, qualityLevel=0.3, minDistance=10)
+    points: cv2.Mat = points.astype(np.float32)
+    points = points.squeeze() # (max_corners, 1, 2) -> (max_corners, 2)
     for i, Y_i in enumerate(Y_seq):
         points_new, st, err = cv2.calcOpticalFlowPyrLK(Y_i.astype(np.uint8), Y_seq[0].astype(np.uint8), points, None)
+        points_new: cv2.Mat = points_new.astype(np.float32)
+        points_new = points_new.squeeze() # (max_corners, 1, 2) -> (max_corners, 2)
         debug("Points:", points)
         debug("Points_new:", points_new)
         
-        # # TODO: Implement this. 
-        # if i!=0:
-        #     rotation_matrix = cv2.getRotationMatrix2D(center=(0, 0), angle=i*3-15, scale=1)
-        #     mv_seq.append(np.float32([[0, 0, i*5-25], [0, 0, i*5-25]])+rotation_matrix)
-        #     # Test. TODO: Delete this after implementation. 
-        # else:
-        #     mv_seq.append(np.float32([[1, 0, 0], [0, 1, 0]])) # Test. TODO: Delete this after implementation. 
+        # X1*x + X2*y + X3 = x' => AX = B
+        # Y1*x + Y2*y + Y3 = y'
+        # We have x, y, x', y'. We want X and Y. 
+        A_x = np.c_[points, np.ones(max_corners)]
+        B_x = points_new[:, 0]
+        debug("A_x:", A_x)
+        debug("B_x:", B_x)
+        U_x, Sigma_x, V_x = np.linalg.svd(A_x)
+        Sigma_x = np.diag(Sigma_x)
+        debug("U_x, Sigma_x, V_x's shapes:", U_x.shape, Sigma_x.shape, V_x.shape)
+        X_vec = V_x*np.c_[np.linalg.inv(Sigma_x), np.zeros((3, max_corners-3))]*U_x.T*B_x
+        debug("X_vec:", X_vec)
+        
+        A_y = points
+        B_y = points_new[:, 1]
+        U_y, Sigma_y, V_y = np.linalg.svd(A_y)
+        Sigma_y = np.diag(Sigma_y)
+        Y_vec = np.linalg.inv(Sigma_y*V_y.T)*U_y.T*B_y
+        debug("Y_vec:", Y_vec)
+        
         
     return mv_seq
 
