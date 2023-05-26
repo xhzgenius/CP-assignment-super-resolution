@@ -9,7 +9,7 @@ import torch
 import torch.nn.functional as F
 
 DEBUG = True
-DEBUG = False
+# DEBUG = False
 def debug(*args):
     if DEBUG:
         print(*args)
