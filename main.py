@@ -3,15 +3,10 @@ from typing import List
 
 import cv2
 import numpy as np
-import torch
-import torch.nn.functional as F
 
-OUTPUT = True
-DEBUG = True
-DEBUG = False
-def debug(*args):
-    if DEBUG:
-        print(*args)
+from utils import *
+
+OUTPUT_IMAGE = True
 
 # 使用高分辨率图像合成低分辨率图像序列
 def lr_generation(ratio: float, 
@@ -43,14 +38,14 @@ def lr_generation(ratio: float,
     
     H_kernel: blur kernel
     """
-    if OUTPUT:
+    if OUTPUT_IMAGE:
         os.makedirs("./outputs/", exist_ok=True)
 
     # 读取高分辨率图像ori.jpg为合成数据素材
     X_ori = cv2.imread(image_file_path)
     if use_grayscale:
         X_ori = cv2.cvtColor(X_ori, cv2.COLOR_RGB2GRAY)
-        if OUTPUT:
+        if OUTPUT_IMAGE:
             cv2.imwrite("./outputs/X_ori_grayscale.jpg", X_ori)
 
     # 添加帧间运动，生成高分辨率图像序列，以第一张为真值(ground truth)
@@ -86,7 +81,7 @@ def lr_generation(ratio: float,
         noise = np.random.normal(0, noise_sigma, X.shape) # 高斯噪声
         X += noise
         Y_seq.append(X)
-        if OUTPUT:
+        if OUTPUT_IMAGE:
             cv2.imwrite("./outputs/Y_%d.jpg"%i, X)
 
     # 返回高分辨率图像真值，低分辨率图像序列，以及模糊核
@@ -137,21 +132,6 @@ def mv_est(Y_seq: List[cv2.Mat], radius: int = 500, max_corners: int = 5):
         debug("mv_matrix:", mv_matrix)
         mv_seq.append(mv_matrix)
     return mv_seq
-
-
-def solve_equation(A: np.ndarray, B: np.ndarray) -> np.ndarray:
-    '''用SVD解方程组AX = B。
-    
-    Returns:
-    ---
-    X: 最优解向量。
-    '''
-    # x_dim = A.shape[1]
-    # U, Sigma, V = np.linalg.svd(A)
-    # X_vec = np.matmul(np.linalg.inv(V.T), np.matmul(U.T, B)[:x_dim]/Sigma)
-    X_vec = np.matmul(np.linalg.pinv(A), B)
-    # 他奶奶滴，我怎么不知道pinv这么一个好东西居然是用SVD得出来的，居然可以用来干这个
-    return X_vec
     
 
 # 实现一轮梯度下降迭代
@@ -195,7 +175,8 @@ def grad_L2(X: cv2.Mat, Y_seq: List[cv2.Mat], mv_seq, ratio, H_kernel) -> cv2.Ma
     grads = []
     for i in range(len(Y_seq)):
         F_i = np.concatenate([mv_seq[i], np.float32([[0, 0, 1]])]) # (x, y)的坐标变换矩阵
-        X_new: cv2.Mat = cv2.warpAffine(src=X, M=F_i[:2], dsize=(X.shape[1]//ratio, X.shape[0]//ratio), borderValue=(0, 0, 0)) # 几何变换
+        X_new: cv2.Mat = cv2.warpAffine(src=X, M=F_i[:2], 
+                                        dsize=(X.shape[1]//ratio, X.shape[0]//ratio), borderValue=(0, 0, 0)) # 几何变换
         X_new = cv2.filter2D(src=X_new, ddepth=-1, kernel=H_kernel) # 模糊
         X_new = cv2.resize(src=X_new, dsize=(X.shape[1]//ratio, X.shape[0]//ratio)) # 降采样。dsize里面长和宽是相反的...
         
@@ -211,30 +192,11 @@ def grad_L2(X: cv2.Mat, Y_seq: List[cv2.Mat], mv_seq, ratio, H_kernel) -> cv2.Ma
         tmp = my_conv_transpose_2d(tmp, H_kernel) # 逆模糊（转置卷积）
         F_i_inverse = np.linalg.inv(F_i)
         # debug("Inverse (x, y) transform matrix:", F_i_inverse)
-        grad: cv2.Mat = cv2.warpAffine(src=tmp, M=F_i_inverse[:2], dsize=(X.shape[1], X.shape[0]), borderValue=(0, 0, 0)) # 逆几何变换
+        grad: cv2.Mat = cv2.warpAffine(src=tmp, M=F_i_inverse[:2], 
+                                       dsize=(X.shape[1], X.shape[0]), borderValue=(0, 0, 0)) # 逆几何变换
         debug("grad's shape:", grad.shape)
         grads.append(grad)
     return np.sum(grads, axis=0)
-
-def my_conv_transpose_2d(image: cv2.Mat, H_kernel: cv2.Mat) -> cv2.Mat:
-    '''
-    计算转置卷积（反卷积）的一个功能函数。用于逆模糊步骤。作者：XHZ。
-    '''
-    if len(image.shape)==2:
-        image = torch.as_tensor(image, dtype=torch.float32, device="cuda").unsqueeze(0).unsqueeze(0)
-                                                                        # (w, h) -> (batch, c, w, h)
-        id3 = torch.as_tensor([[1]], dtype=torch.float32, device="cuda")
-    else: # RGB or BGR or something
-        image = torch.as_tensor(image, dtype=torch.float32, device="cuda").unsqueeze(0).permute([0, 3, 1, 2]) 
-                                                                        # (w, h, c) -> (batch, c, w, h)
-        id3 = torch.as_tensor([[1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=torch.float32, device="cuda")
-    kernel = torch.as_tensor(H_kernel, dtype=torch.float32, device="cuda") # (w, h)
-    kernel = torch.einsum("ij,kl->ijkl", id3, kernel) # (w, h) -> (batch, c, w, h)
-    debug("tmp.shape:", image.shape, "kernel.shape:", kernel.shape)
-    image = F.conv_transpose2d(image, kernel, padding=len(H_kernel)//2, stride=1) # 转置卷积（逆模糊）
-    image = image.squeeze(dim=0).permute([1, 2, 0]).cpu().numpy() # (batch, c, w, h) -> (w, h, c)
-    debug("tmp.shape after conv_transpose2d:", image.shape)
-    return image
 
 # 基于L1范数的梯度
 def grad_L1(X: cv2.Mat, Y_seq: List[cv2.Mat], mv_seq, ratio, H_kernel) -> cv2.Mat:
@@ -258,7 +220,8 @@ def grad_L1(X: cv2.Mat, Y_seq: List[cv2.Mat], mv_seq, ratio, H_kernel) -> cv2.Ma
     grads = []
     for i in range(len(Y_seq)):
         F_i = np.concatenate([mv_seq[i], np.float32([[0, 0, 1]])]) # (x, y)的坐标变换矩阵
-        X_new: cv2.Mat = cv2.warpAffine(src=X, M=F_i[:2], dsize=(X.shape[1]//ratio, X.shape[0]//ratio), borderValue=(0, 0, 0)) # 几何变换
+        X_new: cv2.Mat = cv2.warpAffine(src=X, M=F_i[:2], 
+                                        dsize=(X.shape[1]//ratio, X.shape[0]//ratio), borderValue=(0, 0, 0)) # 几何变换
         X_new = cv2.filter2D(src=X_new, ddepth=-1, kernel=H_kernel) # 模糊
         X_new = cv2.resize(src=X_new, dsize=(X.shape[1]//ratio, X.shape[0]//ratio)) # 降采样。dsize里面长和宽是相反的...
         
