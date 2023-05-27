@@ -248,6 +248,8 @@ def grad_L1(X: cv2.Mat, Y_seq: List[cv2.Mat], mv_seq, ratio, H_kernel) -> cv2.Ma
                                         dsize=(X.shape[1], X.shape[0])) # 几何变换
         X_new = cv2.filter2D(src=X_new, ddepth=-1, kernel=H_kernel) # 模糊
         X_new = cv2.resize(src=X_new, dsize=(X.shape[1]//ratio, X.shape[0]//ratio)) # 降采样。dsize里面长和宽是相反的...
+        if DEBUG:
+            cv2.imwrite("./outputs/X_new_%d.jpg"%(i), X_new)
         
         estimated_error = X_new-Y_seq[i]
         # debug("estimated error's shape:", estimated_error.shape)
@@ -256,13 +258,17 @@ def grad_L1(X: cv2.Mat, Y_seq: List[cv2.Mat], mv_seq, ratio, H_kernel) -> cv2.Ma
                 np.sqrt(np.sum(np.square(estimated_error)) / 
                         (np.shape(estimated_error)[0] * np.shape(estimated_error)[1]))
                 )
-        signed_estimated_error = np.sign(estimated_error)
+        signed_estimated_error = np.sign(estimated_error).astype(np.float32)
         
         tmp = cv2.resize(src=signed_estimated_error, dsize=(X.shape[1], X.shape[0])) # 上采样
         tmp = my_conv_transpose_2d(tmp, H_kernel) # 逆模糊（转置卷积）
         F_i_inverse = np.linalg.inv(F_i)
         grad: cv2.Mat = cv2.warpAffine(src=tmp, M=F_i_inverse[:2], 
                                        dsize=(X.shape[1], X.shape[0])) # 逆几何变换
+        if DEBUG:
+            # cv2.imwrite("./outputs/X_new_%d.jpg"%(i), X_new.astype(np.float32))
+            cv2.imwrite("./outputs/error_%d.jpg"%(i), estimated_error+127)
+            cv2.imwrite("./outputs/grad_%d.jpg"%(i), grad*10+127)
         grads.append(grad)
     return np.sum(grads, axis=0)
 
@@ -298,31 +304,32 @@ def grad_BTV(X: cv2.Mat, Y_seq: List[cv2.Mat], mv_seq, ratio, H_kernel, lamda, P
 # 完成迭代优化的主函数
 def main():
     sr_ratio = 10
-    max_epoches = 10
-    X_ori, Y_seq, H_kernel= lr_generation(sr_ratio, "./ori.jpg", rotate_angle_range=20, shift_pixel_range=20, 
+    max_epoches = 40
+    X_ori, Y_seq, H_kernel= lr_generation(sr_ratio, "./ori.jpg", rotate_angle_range=20, shift_pixel_range=40, 
                                           resize_scale=1., 
-                                          noise_sigma=3, use_grayscale=True, 
-                                          blur_kernel_sigma=3, blur_kernel_size=15, 
+                                          noise_sigma=5, use_grayscale=True, 
+                                          blur_kernel_sigma=3, blur_kernel_size=11, 
                                           serie_len=10)
     mv_seq = mv_est(Y_seq, sr_ratio=sr_ratio)
     debug("Calculated movement matrices:")
     for M in mv_seq:
         debug(M)
     X_start = cv2.resize(Y_seq[0], dsize=(X_ori.shape[1], X_ori.shape[0]))
+    X_start = np.ones(X_ori.shape, dtype=np.float32)*128
     cv2.imwrite("./outputs/epoch_%d.jpg"%0, X_start)
     for epoch in range(1, max_epoches+1):
-        # lr = 0.001*np.exp(-epoch/30)
-        lr = 0.05*np.exp(-epoch/10) # for L1
+        lr = 0.05*np.exp(-epoch/20) # for L2
+        # lr = 1*np.exp(-epoch/20) # for L1
         print("Epoch %d: lr = %f"%(epoch, lr))
         # grad_desent(X_start, Y_seq, mv_seq, ratio=sr_ratio, beta=lr, H_kernel=H_kernel, loss="L2")
-        grad_desent(X_start, Y_seq, mv_seq, ratio=sr_ratio, beta=lr, H_kernel=H_kernel, loss_function="L1_BTV", 
-                    lamda=0.1, P=5, alpha=0.7)
+        grad_desent(X_start, Y_seq, mv_seq, ratio=sr_ratio, beta=lr, H_kernel=H_kernel, loss_function="L2", 
+                    lamda=0.1, P=3, alpha=0.5)
         print("Epoch %d completed. "%epoch)
         cv2.imwrite("./outputs/epoch_%d.jpg"%epoch, X_start)
 
-    for epoch in range(1, max_epoches+1):
+    for epoch in range(0, max_epoches+1, 5):
         print("Evaluating the SR result of epoch %d: "%(epoch))
-        evaluate(X_ori, cv2.imread("./outputs/epoch_%d"%(epoch)))
+        evaluate(X_ori.astype(np.uint8), cv2.imread("./outputs/epoch_%d.jpg"%(epoch)))
 
 if __name__ == '__main__':
     main()
