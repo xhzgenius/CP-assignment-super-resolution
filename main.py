@@ -4,6 +4,7 @@ from typing import List
 import cv2
 import numpy as np
 
+from evaluation import evaluate
 from utils import *
 
 OUTPUT_IMAGE = True
@@ -149,21 +150,24 @@ def mv_est(Y_seq: List[cv2.Mat], sr_ratio: float, max_corners: int = 5):
     
 
 # 实现一轮梯度下降迭代
-def grad_desent(X: cv2.Mat, Y_seq: List[cv2.Mat], mv_seq, ratio, beta, H_kernel, loss: str = "L2"):
+def grad_desent(X: cv2.Mat, Y_seq: List[cv2.Mat], mv_seq, ratio, beta, H_kernel, loss_function: str, 
+                lamda, P, alpha):
     """
     X : 上一轮重建的高分辨率图像
     Y_seq = [Y1,...,YN] : 低分辨率图像序列
     mv_seq = [mv1,...,mvN] : 估计的运动向量，需要注意的是输入的运动向量是低分辨率图像之间的
     ratio: 超分系数
     beta: 学习率
-    loss: 损失函数，可选：["L2", "L1", "L1_BTV"]
+    loss_function: 损失函数种类，可选：["L2", "L1", "L1_BTV"]
     """
-    grad_functions: dict[function] = {
-        "L2": grad_L2, 
-        "L1": grad_L1, 
-        "L1_BTV": grad_BTV
-    }
-    grad: cv2.Mat = grad_functions[loss](X, Y_seq, mv_seq, ratio, H_kernel)
+    if loss_function=="L2":
+        grad: cv2.Mat = grad_L2(X, Y_seq, mv_seq, ratio, H_kernel)
+    elif loss_function=="L1":
+        grad: cv2.Mat = grad_L1(X, Y_seq, mv_seq, ratio, H_kernel)
+    elif loss_function=="L1_BTV":
+        grad: cv2.Mat = grad_BTV(X, Y_seq, mv_seq, ratio, H_kernel, lamda, P, alpha)
+    else:
+        raise ValueError("Loss function should be in ['L2', 'L1', 'L1_BTV'], not %s! "%loss_function)
     X -= beta*grad
 
 
@@ -197,7 +201,7 @@ def grad_L2(X: cv2.Mat, Y_seq: List[cv2.Mat], mv_seq, ratio, H_kernel) -> cv2.Ma
             cv2.imwrite("./outputs/X_new_%d.jpg"%(i), X_new)
         
         estimated_error = X_new-Y_seq[i]
-        debug("estimated error's shape:", estimated_error.shape)
+        # debug("estimated error's shape:", estimated_error.shape)
         if i==0:
             print("estimated error's L2 norm of Y_seq[0]:", 
                 np.sqrt(np.sum(np.square(estimated_error)) / 
@@ -246,7 +250,7 @@ def grad_L1(X: cv2.Mat, Y_seq: List[cv2.Mat], mv_seq, ratio, H_kernel) -> cv2.Ma
         X_new = cv2.resize(src=X_new, dsize=(X.shape[1]//ratio, X.shape[0]//ratio)) # 降采样。dsize里面长和宽是相反的...
         
         estimated_error = X_new-Y_seq[i]
-        debug("estimated error's shape:", estimated_error.shape)
+        # debug("estimated error's shape:", estimated_error.shape)
         if i==0:
             print("estimated error's L2 norm of Y_seq[0]:", 
                 np.sqrt(np.sum(np.square(estimated_error)) / 
@@ -264,7 +268,7 @@ def grad_L1(X: cv2.Mat, Y_seq: List[cv2.Mat], mv_seq, ratio, H_kernel) -> cv2.Ma
 
 
 # 基于L1范数，使用双边全变分正则项的梯度
-def grad_BTV(X, Y_seq, mv_seq, ratio, H_kernel, lamda, P, alpha):
+def grad_BTV(X: cv2.Mat, Y_seq: List[cv2.Mat], mv_seq, ratio, H_kernel, lamda, P, alpha):
     """
     X : 上一轮重建的高分辨率图像
     Y_seq = [Y1,...,YN] : 低分辨率图像序列
@@ -276,16 +280,28 @@ def grad_BTV(X, Y_seq, mv_seq, ratio, H_kernel, lamda, P, alpha):
     grad = grad_L1(X, Y_seq, mv_seq, ratio, H_kernel)
     for dx in range(-P, P+1):
         for dy in range(-P, P+1):
-            pass
+            X_shifted = cv2.warpAffine(X, np.float32([[1, 0, dx], [0, 1, dy]]), 
+                                       dsize=(X.shape[1], X.shape[0])).astype(np.float32)
+            diff_dx_dy = X-X_shifted
+            diff_dx_dy_signed = np.sign(diff_dx_dy)
+            tmp_grad = diff_dx_dy_signed-cv2.warpAffine(diff_dx_dy_signed, np.float32([[1, 0, -dx], [0, 1, -dy]]), 
+                                                 dsize=(X.shape[1], X.shape[0])).astype(np.float32)
+            if DEBUG:
+                cv2.imwrite("./outputs/diff_%d_%d.jpg"%(dx, dy), diff_dx_dy+127)
+                cv2.imwrite("./outputs/tmp_grad_%d_%d.jpg"%(dx, dy), tmp_grad+127)
+            grad += tmp_grad*lamda*np.power(alpha, np.abs(dx)+np.abs(dy))
+    if DEBUG:
+        cv2.imwrite("./outputs/grad_with_BTV.jpg", grad+127)
     return grad
 
 
 # 完成迭代优化的主函数
 def main():
     sr_ratio = 10
-    X_ori, Y_seq, H_kernel= lr_generation(sr_ratio, "./kq.jpg", rotate_angle_range=20, shift_pixel_range=20, 
+    max_epoches = 10
+    X_ori, Y_seq, H_kernel= lr_generation(sr_ratio, "./ori.jpg", rotate_angle_range=20, shift_pixel_range=20, 
                                           resize_scale=1., 
-                                          noise_sigma=3, use_grayscale=False, 
+                                          noise_sigma=3, use_grayscale=True, 
                                           blur_kernel_sigma=3, blur_kernel_size=15, 
                                           serie_len=10)
     mv_seq = mv_est(Y_seq, sr_ratio=sr_ratio)
@@ -293,21 +309,20 @@ def main():
     for M in mv_seq:
         debug(M)
     X_start = cv2.resize(Y_seq[0], dsize=(X_ori.shape[1], X_ori.shape[0]))
-    # X_start = np.zeros(X_ori.shape, dtype=np.float32)
-    # for epoch in range(1, 51):
-    #     # grad_desent(X_start, Y_seq, mv_seq, ratio=10, beta=0.5, H_kernel=H_kernel, loss="L1")
-    #     grad_desent(X_start, Y_seq, mv_seq, ratio=10, beta=0.005, H_kernel=H_kernel, loss="L2")
-    # if DEBUG:
-    #     raise
-    for epoch in range(1, 51):
+    cv2.imwrite("./outputs/epoch_%d.jpg"%0, X_start)
+    for epoch in range(1, max_epoches+1):
         # lr = 0.001*np.exp(-epoch/30)
-        lr = 0.05*np.exp(-epoch/20) # for L1
+        lr = 0.05*np.exp(-epoch/10) # for L1
         print("Epoch %d: lr = %f"%(epoch, lr))
         # grad_desent(X_start, Y_seq, mv_seq, ratio=sr_ratio, beta=lr, H_kernel=H_kernel, loss="L2")
-        grad_desent(X_start, Y_seq, mv_seq, ratio=sr_ratio, beta=lr, H_kernel=H_kernel, loss="L1")
+        grad_desent(X_start, Y_seq, mv_seq, ratio=sr_ratio, beta=lr, H_kernel=H_kernel, loss_function="L1_BTV", 
+                    lamda=0.1, P=5, alpha=0.7)
         print("Epoch %d completed. "%epoch)
         cv2.imwrite("./outputs/epoch_%d.jpg"%epoch, X_start)
 
+    for epoch in range(1, max_epoches+1):
+        print("Evaluating the SR result of epoch %d: "%(epoch))
+        evaluate(X_ori, cv2.imread("./outputs/epoch_%d"%(epoch)))
 
 if __name__ == '__main__':
     main()

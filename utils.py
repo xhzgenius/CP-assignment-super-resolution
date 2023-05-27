@@ -42,8 +42,8 @@ def my_conv_transpose_2d(image: cv2.Mat, H_kernel: cv2.Mat) -> cv2.Mat:
         id3 = torch.as_tensor([[1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=torch.float32, device="cuda")
     kernel = torch.as_tensor(H_kernel, dtype=torch.float32, device="cuda") # (w, h)
     kernel = torch.einsum("ij,kl->ijkl", id3, kernel) # (w, h) -> (batch, c, w, h)
-    debug("tmp.shape:", image.shape, "kernel.shape:", kernel.shape)
+    # debug("tmp.shape:", image.shape, "kernel.shape:", kernel.shape)
     image = F.conv_transpose2d(image, kernel, padding=len(H_kernel)//2, stride=1) # 转置卷积（逆模糊）
     image = image.squeeze(dim=0).permute([1, 2, 0]).cpu().numpy() # (batch, c, w, h) -> (w, h, c)
-    debug("tmp.shape after conv_transpose2d:", image.shape)
+    # debug("tmp.shape after conv_transpose2d:", image.shape)
     return image
